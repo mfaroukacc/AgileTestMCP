@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Secrets - never commit. Each person fills in their own credentials.
+.env
+.env.*
+!.env.example
+
+# Runtime output. Regenerated on every run and specific to one machine.
+Execution_Results/
+Generated_Test_Cases/
+!Generated_Test_Cases/.gitkeep
+
+# Lock/state files from interrupted runs
+*.log
+npm-debug.log*
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Tarballs from npm pack
+*.tgz

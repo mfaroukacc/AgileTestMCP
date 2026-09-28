@@ -1,0 +1,31 @@
+{
+  "name": "testcase-creator-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that turns a generated test-case CSV into Jira Test Case issues with matching AgileTest test cases, steps and preconditions.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "testcase-creator-mcp": "mcp/server.js"
+  },
+  "files": [
+    "mcp/",
+    "src/",
+    "scripts/",
+    ".env.example",
+    "README.md"
+  ],
+  "scripts": {
+    "mcp": "node mcp/server.js",
+    "mcp:check": "node mcp/server.js --check",
+    "verify": "node scripts/verify-setup.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "zod": "^3.24.1"
+  }
+}
