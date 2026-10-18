@@ -111,7 +111,7 @@ section("3. Every MCP tool registers with a handler and a schema");
     console.log("NOFORCE=" + (tools.every((t) => !/\\bforce\\b/i.test(t.n)) ));
   `);
   const n = Number((out.match(/TOOLS=(\d+)/) || [])[1]);
-  check("19 tools registered", n === 19, `got ${n}`);
+  check("29 tools registered", n === 29, `got ${n}`);
   check("all have handler + inputSchema", /SCHEMAS_OK/.test(out));
 }
 
@@ -123,7 +123,13 @@ section("4. Write-capable tools are safe by default");
     const tools = [];
     const srv = { tool: (n, c) => tools.push([n, c.inputSchema]) };
     JiraTools.register(srv); AgileTestTools.register(srv);
-    const WRITES = ["push_test_cases", "jira_run_csv_from_env_story", "jira_agiletest_run_from_env_story", "agiletest_run_csv_from_env_story", "dedupe_story"];
+    const WRITES = [
+      "push_test_cases", "jira_run_csv_from_env_story", "jira_agiletest_run_from_env_story",
+      "agiletest_run_csv_from_env_story", "dedupe_story",
+      "agiletest_create_test_execution", "agiletest_create_test_plan",
+      "agiletest_link_testcases_to_execution", "agiletest_link_testcases_to_test_plan",
+      "agiletest_link_test_plan_to_executions",
+    ];
     let bad = 0, seen = 0;
     for (const [n, s] of tools) {
       if (!WRITES.includes(n)) continue;
@@ -136,7 +142,7 @@ section("4. Write-capable tools are safe by default");
   `);
   const seen = Number((out.match(/SEEN=(\d+)/) || [])[1]);
   const bad = Number((out.match(/UNSAFE_COUNT=(\d+)/) || [])[1]);
-  check("5 write-capable tools checked", seen === 5, `got ${seen}`);
+  check("10 write-capable tools checked", seen === 10, `got ${seen}`);
   check("all default to dry run when dryRun is omitted", bad === 0, bad ? `${bad} still write by default` : "");
 }
 

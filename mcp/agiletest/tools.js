@@ -5,7 +5,16 @@ import {
   getAgileTestTestcasesByJiraIssueIds,
   createAgileTestTestStep,
   createAgileTestPrecondition,
+  createAgileTestExecution,
+  getAgileTestExecutionsByJiraIssueIds,
+  getAgileTestExecutionTestCases,
+  linkAgileTestTestCasesToExecution,
+  createAgileTestTestPlan,
+  getAgileTestTestPlansByJiraIssueIds,
+  linkAgileTestTestCasesToTestPlan,
+  linkAgileTestTestPlanToExecutions,
 } from "../../src/core/agiletestClient.js";
+import { getJiraIssuesBulk } from "../../src/core/jiraClient.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -126,6 +135,154 @@ async function resolveAgileTestCase(jwt, projectId, jiraIssueId) {
 
   return agileTestCase;
 }
+
+// AgileTest is optional per call: every new tool takes projectId explicitly but
+// falls back to AGILETEST_PROJECT_ID from .env, so a caller never has to repeat
+// a value that is already configured.
+function resolveProjectId(input) {
+  const projectId = String(input?.projectId || process.env.AGILETEST_PROJECT_ID || "").trim();
+  if (!projectId) {
+    throw new Error(
+      "AgileTest project id is required: pass projectId or set AGILETEST_PROJECT_ID in .env.",
+    );
+  }
+  return projectId;
+}
+
+// Every tool that writes to AgileTest previews first, matching the pipeline
+// tools: an accidental call with no arguments changes nothing.
+const dryRunSchema = z
+  .boolean()
+  .optional()
+  .default(true)
+  .describe("Preview only; make no changes. Pass dryRun=false to write. Default is true.");
+
+function dryRunPreview(projectId, action, details = {}) {
+  return {
+    dryRun: true,
+    projectId,
+    plannedAction: action,
+    ...details,
+    note: "Nothing was sent to AgileTest. Call again with dryRun=false to apply.",
+  };
+}
+
+const JIRA_ISSUE_IDS = z
+  .array(z.union([z.string(), z.number()]))
+  .min(1)
+  .describe("Numeric Jira issue IDs (not issue keys), e.g. [17576]");
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// /ds/test-executions/{id}/test-cases returns testExecutionItems as a single
+// object when a case has one result row and as an array when it has several.
+function executionItemsOf(testCase) {
+  const raw = testCase?.testExecutionItems;
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") return [raw];
+  return [];
+}
+
+// List inputs are optional in the schema on purpose: the verify script proves
+// that omitting every argument still resolves dryRun=true, so emptiness is
+// enforced here instead, where the caller gets a named error.
+function requireIds(value, name) {
+  const list = (Array.isArray(value) ? value : [])
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
+  if (!list.length) {
+    throw new Error(`${name} must contain at least one numeric id.`);
+  }
+  return list;
+}
+
+const isoDate = (ms = Date.now()) => new Date(ms).toISOString().slice(0, 10);
+
+// The link/list tools are keyed by the AgileTest entity id, but callers usually
+// only hold the Jira issue id that produced it, so both are accepted everywhere.
+async function resolveAgileTestExecutionId(jwt, projectId, { testExecutionId, jiraTestExecutionIssueId }) {
+  if (testExecutionId != null && String(testExecutionId).trim()) {
+    return String(testExecutionId).trim();
+  }
+  if (jiraTestExecutionIssueId == null || !String(jiraTestExecutionIssueId).trim()) {
+    throw new Error(
+      "Provide testExecutionId (AgileTest execution id) or jiraTestExecutionIssueId (numeric Jira Test Execution issue id).",
+    );
+  }
+
+  const executions = await getAgileTestExecutionsByJiraIssueIds(jwt, {
+    projectId,
+    testExecutionIssueIds: [String(jiraTestExecutionIssueId).trim()],
+  });
+
+  const execution = executions[0];
+  if (!execution?.id) {
+    throw new Error(
+      `No AgileTest Test Execution found for Jira issue id ${jiraTestExecutionIssueId}. ` +
+        "Create it first with agiletest_create_test_execution.",
+    );
+  }
+  return String(execution.id);
+}
+
+async function resolveAgileTestPlanId(jwt, projectId, { testPlanId, jiraTestPlanIssueId }) {
+  if (testPlanId != null && String(testPlanId).trim()) {
+    return String(testPlanId).trim();
+  }
+  if (jiraTestPlanIssueId == null || !String(jiraTestPlanIssueId).trim()) {
+    throw new Error(
+      "Provide testPlanId (AgileTest plan id) or jiraTestPlanIssueId (numeric Jira Test Plan issue id).",
+    );
+  }
+
+  const plans = await getAgileTestTestPlansByJiraIssueIds(jwt, {
+    projectId,
+    testPlanIssueIds: [String(jiraTestPlanIssueId).trim()],
+  });
+
+  const plan = plans[0];
+  if (!plan?.id) {
+    throw new Error(
+      `No AgileTest Test Plan found for Jira issue id ${jiraTestPlanIssueId}. ` +
+        "Create it first with agiletest_create_test_plan.",
+    );
+  }
+  return String(plan.id);
+}
+
+const ID_INPUTS = {
+  testExecutionId: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe("AgileTest Test Execution id (from agiletest_create_test_execution)."),
+  jiraTestExecutionIssueId: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe("Numeric Jira Test Execution issue id; used to resolve the AgileTest execution id when testExecutionId is omitted."),
+  testPlanId: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe("AgileTest Test Plan id (from agiletest_create_test_plan)."),
+  jiraTestPlanIssueId: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe("Numeric Jira Test Plan issue id; used to resolve the AgileTest plan id when testPlanId is omitted."),
+};
+
+// AgileTest test execution result status ids (instance-specific, see readme.txt).
+const RESULT_STATUS = {
+  pass: 28912,
+  fail: 28913,
+  blocked: 28914,
+  query: 28915,
+  skipped: 28916,
+  retest: 28917,
+};
+
+// Result status id -> human label, for readable summaries.
+const RESULT_STATUS_LABELS = Object.fromEntries(
+  Object.entries(RESULT_STATUS).map(([label, id]) => [String(id), label]),
+);
 
 export class AgileTestTools {
   static register(server) {
@@ -557,6 +714,654 @@ export class AgileTestTools {
           preconditionErrors: result.preconditionErrors || [],
           resultsCsvPath: path.join("Execution_Results", `${storyKey}_testcases_results.csv`),
           durationLabel: formatDuration(result.durationMs),
+        };
+      },
+    });
+
+    // ------------------------------------------------------------------
+    // Test executions
+    // ------------------------------------------------------------------
+
+    // Tool: create an AgileTest Test Execution from Jira Test Execution issues
+    server.tool("agiletest_create_test_execution", {
+      title: "Create AgileTest Test Execution",
+      description:
+        "Create AgileTest Test Execution(s) from numeric Jira Test Execution issue ID(s) and return the AgileTest " +
+        "execution id(s) needed by every other execution tool. Two calls are made: POST /ds/test-executions creates " +
+        "the execution(s), then POST /ds/test-executions/issue/bulk resolves the AgileTest ids (the create response " +
+        "does not reliably carry them). Use this once a Jira Test Execution issue exists - it is the AgileTest " +
+        "counterpart of that Jira issue, not a new Jira issue. Typical setup order: create_test_execution -> " +
+        "agiletest_link_testcases_to_execution -> execute tests. Previews by default; pass dryRun=false to create.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testExecutionIssueIds: JIRA_ISSUE_IDS.optional().describe(
+          "Numeric Jira Test Execution issue IDs (e.g. Data.json JIRA_TESTEXEC_ISSUE_ID), not keys. " +
+            "Required when dryRun=false.",
+        ),
+        dryRun: dryRunSchema,
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const testExecutionIssueIds = requireIds(input.testExecutionIssueIds, "testExecutionIssueIds");
+
+        if (input.dryRun !== false) {
+          return dryRunPreview(
+            projectId,
+            "POST /ds/test-executions then POST /ds/test-executions/issue/bulk",
+            { testExecutionIssueIds },
+          );
+        }
+
+        const jwt = await getAgileTestJwt();
+        const created = await createAgileTestExecution(jwt, { projectId, testExecutionIssueIds });
+        const executions = await getAgileTestExecutionsByJiraIssueIds(jwt, {
+          projectId,
+          testExecutionIssueIds,
+        });
+
+        return {
+          dryRun: false,
+          projectId,
+          created,
+          executions,
+          testExecutionIds: executions.map((e) => String(e?.id ?? "")),
+        };
+      },
+    });
+
+    // Tool: resolve AgileTest Test Executions from Jira Test Execution issues
+    server.tool("agiletest_get_test_executions_by_issue_ids", {
+      title: "Get AgileTest Test Executions by Jira issue IDs",
+      description:
+        "Read-only lookup of existing AgileTest Test Execution(s) by their numeric Jira Test Execution issue ID(s) " +
+        "via POST /ds/test-executions/issue/bulk. Use to recover the AgileTest execution id for an execution that " +
+        "was created earlier (it is not stored anywhere except Data.json in the legacy scripts), or to confirm an " +
+        "execution exists before linking test cases to it. Never creates anything.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testExecutionIssueIds: JIRA_ISSUE_IDS.describe("Numeric Jira Test Execution issue IDs."),
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const testExecutionIssueIds = input.testExecutionIssueIds.map(String);
+        const jwt = await getAgileTestJwt();
+        const executions = await getAgileTestExecutionsByJiraIssueIds(jwt, {
+          projectId,
+          testExecutionIssueIds,
+        });
+
+        return {
+          projectId,
+          testExecutionIssueIds,
+          count: executions.length,
+          executions,
+          testExecutionIds: executions.map((e) => String(e?.id ?? "")),
+        };
+      },
+    });
+
+    // Tool: list the test cases (and their results) of an execution
+    server.tool("agiletest_get_testcases_for_execution", {
+      title: "Get Test Cases for an AgileTest Execution",
+      description:
+        "Read-only list of the AgileTest test cases linked to an AgileTest Test Execution via " +
+        "GET /ds/test-executions/{id}/test-cases, including each case's testExecutionItems with the recorded " +
+        "result status ids (28912 pass, 28913 fail, 28914 blocked, 28915 query, 28916 skipped, 28917 retest). " +
+        "Accepts either the AgileTest execution id or the numeric Jira Test Execution issue id (resolved through " +
+        "the bulk lookup). Use to inspect what ran and how it ended; use agiletest_export_failed_testcases for a " +
+        "failures-only view with Jira keys.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testExecutionId: ID_INPUTS.testExecutionId,
+        jiraTestExecutionIssueId: ID_INPUTS.jiraTestExecutionIssueId,
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const jwt = await getAgileTestJwt();
+        const testExecutionId = await resolveAgileTestExecutionId(jwt, projectId, input);
+
+        const items = await getAgileTestExecutionTestCases(jwt, { projectId, testExecutionId });
+
+        const testCases = items.map((tc) => {
+          const executionItems = executionItemsOf(tc);
+          const resultIds = executionItems
+            .map((item) => String(item?.result ?? ""))
+            .filter((id) => id && id !== "null" && id !== "undefined");
+
+          return {
+            agileTestTestCaseId: tc?.id ?? null,
+            jiraIssueId: tc?.issueId ?? tc?.jiraIssueId ?? tc?.jira?.issueId ?? null,
+            resultIds,
+            results: resultIds.map((id) => RESULT_STATUS_LABELS[id] || id),
+            failed: resultIds.includes(String(RESULT_STATUS.fail)),
+          };
+        });
+
+        return {
+          projectId,
+          testExecutionId,
+          count: testCases.length,
+          failedCount: testCases.filter((tc) => tc.failed).length,
+          testCases,
+          items,
+        };
+      },
+    });
+
+    // Tool: link test cases to an execution
+    server.tool("agiletest_link_testcases_to_execution", {
+      title: "Link Test Cases to an AgileTest Execution",
+      description:
+        "Link numeric Jira Test Case issue IDs to an AgileTest Test Execution via " +
+        "POST /ds/test-executions/{id}/link/test-cases, so the cases appear in that execution and their results " +
+        "are recorded against it. Requires the execution to exist (agiletest_create_test_execution) and the test " +
+        "cases to already exist as AgileTest test cases (agiletest_create_testcases_from_issue_ids). " +
+        "The execution may be given as the AgileTest id or as the numeric Jira Test Execution issue id. " +
+        "Previews by default; pass dryRun=false to link.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testExecutionId: ID_INPUTS.testExecutionId,
+        jiraTestExecutionIssueId: ID_INPUTS.jiraTestExecutionIssueId,
+        testCaseIssueIds: JIRA_ISSUE_IDS.optional().describe(
+          "Numeric Jira Test Case issue IDs to link into the execution. Required when dryRun=false.",
+        ),
+        dryRun: dryRunSchema,
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const testCaseIssueIds = requireIds(input.testCaseIssueIds, "testCaseIssueIds");
+
+        if (input.dryRun !== false) {
+          return dryRunPreview(
+            projectId,
+            "POST /ds/test-executions/{id}/link/test-cases",
+            {
+              testExecutionId: input.testExecutionId ?? null,
+              jiraTestExecutionIssueId: input.jiraTestExecutionIssueId ?? null,
+              testCaseIssueIds,
+            },
+          );
+        }
+
+        const jwt = await getAgileTestJwt();
+        const testExecutionId = await resolveAgileTestExecutionId(jwt, projectId, input);
+        const result = await linkAgileTestTestCasesToExecution(jwt, {
+          projectId,
+          testExecutionId,
+          testCaseIssueIds,
+        });
+
+        return {
+          dryRun: false,
+          projectId,
+          testExecutionId,
+          testCaseIssueIds,
+          linkedCount: testCaseIssueIds.length,
+          result,
+        };
+      },
+    });
+
+    // ------------------------------------------------------------------
+    // Test plans
+    // ------------------------------------------------------------------
+
+    // Tool: create an AgileTest Test Plan from Jira Test Plan issues
+    server.tool("agiletest_create_test_plan", {
+      title: "Create AgileTest Test Plan",
+      description:
+        "Create AgileTest Test Plan(s) from numeric Jira Test Plan issue ID(s) over a start/end date range and " +
+        "return the AgileTest plan id(s). Two calls are made: POST /ds/test-plans creates the plan(s), then " +
+        "POST /ds/test-plans/issue/bulk resolves the AgileTest ids. Dates are YYYY-MM-DD and default to today / " +
+        "today+3 days when omitted. Use once a Jira Test Plan issue exists; afterwards assign executions and cases " +
+        "to it with agiletest_link_test_plan_to_executions and agiletest_link_testcases_to_test_plan. " +
+        "Previews by default; pass dryRun=false to create.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testPlanIssueIds: JIRA_ISSUE_IDS.optional().describe(
+          "Numeric Jira Test Plan issue IDs (Data.json JIRA_TESTPLAN_ISSUE_ID). Required when dryRun=false.",
+        ),
+        startDate: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "startDate must be YYYY-MM-DD")
+          .optional()
+          .describe("Plan start date, YYYY-MM-DD. Defaults to today."),
+        endDate: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "endDate must be YYYY-MM-DD")
+          .optional()
+          .describe("Plan end date, YYYY-MM-DD. Defaults to today + 3 days."),
+        dryRun: dryRunSchema,
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const testPlanIssueIds = requireIds(input.testPlanIssueIds, "testPlanIssueIds");
+        const startDate = input.startDate || isoDate();
+        const endDate = input.endDate || isoDate(Date.now() + 3 * 24 * 60 * 60 * 1000);
+
+        if (input.dryRun !== false) {
+          return dryRunPreview(projectId, "POST /ds/test-plans then POST /ds/test-plans/issue/bulk", {
+            testPlanIssueIds,
+            startDate,
+            endDate,
+          });
+        }
+
+        const jwt = await getAgileTestJwt();
+        const created = await createAgileTestTestPlan(jwt, {
+          projectId,
+          testPlanIssueIds,
+          startDate,
+          endDate,
+        });
+        const testPlans = await getAgileTestTestPlansByJiraIssueIds(jwt, {
+          projectId,
+          testPlanIssueIds,
+        });
+
+        return {
+          dryRun: false,
+          projectId,
+          startDate,
+          endDate,
+          created,
+          testPlans,
+          testPlanIds: testPlans.map((p) => String(p?.id ?? "")),
+        };
+      },
+    });
+
+    // Tool: resolve AgileTest Test Plans from Jira Test Plan issues
+    server.tool("agiletest_get_test_plans_by_issue_ids", {
+      title: "Get AgileTest Test Plans by Jira issue IDs",
+      description:
+        "Read-only lookup of existing AgileTest Test Plan(s) by their numeric Jira Test Plan issue ID(s) via " +
+        "POST /ds/test-plans/issue/bulk. Use to recover the AgileTest plan id needed by the link tools, or to " +
+        "confirm a plan exists before assigning a test execution to it. Never creates anything.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testPlanIssueIds: JIRA_ISSUE_IDS.describe("Numeric Jira Test Plan issue IDs."),
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const testPlanIssueIds = input.testPlanIssueIds.map(String);
+        const jwt = await getAgileTestJwt();
+        const testPlans = await getAgileTestTestPlansByJiraIssueIds(jwt, { projectId, testPlanIssueIds });
+
+        return {
+          projectId,
+          testPlanIssueIds,
+          count: testPlans.length,
+          testPlans,
+          testPlanIds: testPlans.map((p) => String(p?.id ?? "")),
+        };
+      },
+    });
+
+    // Tool: assign a test execution to a test plan
+    server.tool("agiletest_link_test_plan_to_executions", {
+      title: "Assign Test Executions to a Test Plan",
+      description:
+        "Assign AgileTest Test Execution(s) to an existing AgileTest Test Plan via " +
+        "POST /ds/test-plans/{id}/link/test-executions, addressed by numeric Jira Test Execution issue ID(s). " +
+        "This is what puts an execution inside a plan. Optionally pass testCaseIssueIds to link the same test " +
+        "cases to the plan in the same call (the plan equivalent of POST /ds/test-plans/{id}/link/test-cases), " +
+        "which is what the legacy linkTestPlanToExecution script did in two steps. The plan may be given as the " +
+        "AgileTest plan id or the numeric Jira Test Plan issue id. " +
+        "Previews by default; pass dryRun=false to link.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testPlanId: ID_INPUTS.testPlanId,
+        jiraTestPlanIssueId: ID_INPUTS.jiraTestPlanIssueId,
+        testExecutionIssueIds: JIRA_ISSUE_IDS.optional().describe(
+          "Numeric Jira Test Execution issue IDs to assign to the plan. Required when dryRun=false.",
+        ),
+        testCaseIssueIds: z
+          .array(z.union([z.string(), z.number()]))
+          .optional()
+          .describe("Optional numeric Jira Test Case issue IDs to link to the plan as well."),
+        dryRun: dryRunSchema,
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const testExecutionIssueIds = requireIds(input.testExecutionIssueIds, "testExecutionIssueIds");
+        const testCaseIssueIds = (input.testCaseIssueIds || []).map(String);
+
+        if (input.dryRun !== false) {
+          return dryRunPreview(
+            projectId,
+            testCaseIssueIds.length
+              ? "POST /ds/test-plans/{id}/link/test-executions then POST /ds/test-plans/{id}/link/test-cases"
+              : "POST /ds/test-plans/{id}/link/test-executions",
+            {
+              testPlanId: input.testPlanId ?? null,
+              jiraTestPlanIssueId: input.jiraTestPlanIssueId ?? null,
+              testExecutionIssueIds,
+              testCaseIssueIds,
+            },
+          );
+        }
+
+        const jwt = await getAgileTestJwt();
+        const testPlanId = await resolveAgileTestPlanId(jwt, projectId, input);
+
+        const linkedExecutions = await linkAgileTestTestPlanToExecutions(jwt, {
+          projectId,
+          testPlanId,
+          testExecutionIssueIds,
+        });
+
+        let linkedTestCases = null;
+        if (testCaseIssueIds.length) {
+          linkedTestCases = await linkAgileTestTestCasesToTestPlan(jwt, {
+            projectId,
+            testPlanId,
+            testCaseIssueIds,
+          });
+        }
+
+        return {
+          dryRun: false,
+          projectId,
+          testPlanId,
+          testExecutionIssueIds,
+          linkedExecutions,
+          testCaseIssueIds,
+          linkedTestCases,
+        };
+      },
+    });
+
+    // Tool: link test cases to a plan
+    server.tool("agiletest_link_testcases_to_test_plan", {
+      title: "Link Test Cases to an AgileTest Test Plan",
+      description:
+        "Link numeric Jira Test Case issue IDs to an AgileTest Test Plan via " +
+        "POST /ds/test-plans/{id}/link/test-cases, so the cases are covered by that plan (reporting, plan " +
+        "progress). Requires the plan to exist (agiletest_create_test_plan) and the cases to exist as AgileTest " +
+        "test cases. The plan may be given as the AgileTest plan id or the numeric Jira Test Plan issue id. " +
+        "Previews by default; pass dryRun=false to link.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testPlanId: ID_INPUTS.testPlanId,
+        jiraTestPlanIssueId: ID_INPUTS.jiraTestPlanIssueId,
+        testCaseIssueIds: JIRA_ISSUE_IDS.optional().describe(
+          "Numeric Jira Test Case issue IDs to link into the plan. Required when dryRun=false.",
+        ),
+        dryRun: dryRunSchema,
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const testCaseIssueIds = requireIds(input.testCaseIssueIds, "testCaseIssueIds");
+
+        if (input.dryRun !== false) {
+          return dryRunPreview(projectId, "POST /ds/test-plans/{id}/link/test-cases", {
+            testPlanId: input.testPlanId ?? null,
+            jiraTestPlanIssueId: input.jiraTestPlanIssueId ?? null,
+            testCaseIssueIds,
+          });
+        }
+
+        const jwt = await getAgileTestJwt();
+        const testPlanId = await resolveAgileTestPlanId(jwt, projectId, input);
+        const result = await linkAgileTestTestCasesToTestPlan(jwt, {
+          projectId,
+          testPlanId,
+          testCaseIssueIds,
+        });
+
+        return {
+          dryRun: false,
+          projectId,
+          testPlanId,
+          testCaseIssueIds,
+          linkedCount: testCaseIssueIds.length,
+          result,
+        };
+      },
+    });
+
+    // ------------------------------------------------------------------
+    // Test case resolution
+    // ------------------------------------------------------------------
+
+    // Tool: poll until a Jira issue's AgileTest test case exists
+    server.tool("agiletest_resolve_testcase_by_jira_issue_id", {
+      title: "Wait for an AgileTest Test Case to Appear",
+      description:
+        "Read-only poll of POST /ds/test-cases/issue/bulk until the AgileTest test case mapped to a numeric Jira " +
+        "issue ID exists, then return it with its AgileTest testCaseId. Use right after creating Jira Test Cases or " +
+        "after agiletest_create_testcases_from_issue_ids: the Jira->AgileTest sync is asynchronous, so the mapping " +
+        "often does not exist for several seconds and a single lookup fails. This waits instead of failing. " +
+        "Nothing is created or changed; it only reads, with a bounded timeout.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        jiraIssueId: z
+          .union([z.string(), z.number()])
+          .describe("Numeric Jira Test Case issue ID to resolve."),
+        maxWaitSeconds: z
+          .number()
+          .int()
+          .min(0)
+          .max(600)
+          .optional()
+          .default(120)
+          .describe("How long to keep polling before giving up. 0 = single attempt. Default 120."),
+        pollIntervalSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(60)
+          .optional()
+          .default(10)
+          .describe("Delay between attempts. Default 10."),
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const jiraIssueId = String(input.jiraIssueId);
+        const maxWaitSeconds = input.maxWaitSeconds ?? 120;
+        const pollIntervalSeconds = input.pollIntervalSeconds ?? 10;
+
+        const jwt = await getAgileTestJwt();
+        const deadline = Date.now() + maxWaitSeconds * 1000;
+
+        let attempts = 0;
+        let lastError = null;
+
+        for (;;) {
+          attempts += 1;
+          try {
+            const testCases = await getAgileTestTestcasesByJiraIssueIds(jwt, {
+              projectId,
+              jiraIssueIds: [jiraIssueId],
+              expand: [],
+            });
+
+            if (Array.isArray(testCases) && testCases.length) {
+              return {
+                found: true,
+                attempts,
+                projectId,
+                jiraIssueId,
+                agileTestTestCaseId: testCases[0]?.id ?? null,
+                testCase: testCases[0],
+              };
+            }
+            lastError = null;
+          } catch (err) {
+            lastError = err?.response?.data || err?.message || String(err);
+          }
+
+          if (Date.now() + pollIntervalSeconds * 1000 > deadline) break;
+          await sleep(pollIntervalSeconds * 1000);
+        }
+
+        throw new Error(
+          `AgileTest test case for Jira issue id ${jiraIssueId} did not appear within ${maxWaitSeconds}s ` +
+            `(${attempts} attempt(s)). ` +
+            (lastError ? `Last error: ${typeof lastError === "string" ? lastError : JSON.stringify(lastError)}. ` : "") +
+            "Confirm the Jira issue is a Test Case, that it is linked to the story, and that AgileTest has synced it.",
+        );
+      },
+    });
+
+    // ------------------------------------------------------------------
+    // Execution reporting
+    // ------------------------------------------------------------------
+
+    // Tool: export failed test cases of an execution
+    server.tool("agiletest_export_failed_testcases", {
+      title: "Export Failed Test Cases from an Execution",
+      description:
+        "Read-only report of the test cases that FAILED in an AgileTest Test Execution. Reads " +
+        "GET /ds/test-executions/{id}/test-cases, keeps every case with any testExecutionItems result equal to " +
+        "the failed status id (default 28913), then resolves each Jira issue id to its Jira key in one bulk Jira " +
+        "query. Returns structured rows plus the exact markdown table the legacy `npm run agile:export-failed` " +
+        "script produced (# | Jira Test Case Issue ID | Jira Test Case Key), so a bug-creation agent can consume " +
+        "it directly. Nothing is written unless outputPath is passed; no AgileTest or Jira data is modified.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testExecutionId: ID_INPUTS.testExecutionId,
+        jiraTestExecutionIssueId: ID_INPUTS.jiraTestExecutionIssueId,
+        failedResultId: z
+          .number()
+          .int()
+          .optional()
+          .default(RESULT_STATUS.fail)
+          .describe("Result status id treated as failure. Default 28913 (fail)."),
+        resolveJiraKeys: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("Resolve each Jira issue id to its issue key via Jira. Default true; set false to skip Jira."),
+        outputPath: z
+          .string()
+          .optional()
+          .describe(
+            "Optional path (absolute, or relative to the MCP repo root) to write the markdown, " +
+              "e.g. 'Failed_Test_Cases.md'. Omit to return the markdown without touching disk.",
+          ),
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const failedResultId = input.failedResultId ?? RESULT_STATUS.fail;
+
+        const jwt = await getAgileTestJwt();
+        const testExecutionId = await resolveAgileTestExecutionId(jwt, projectId, input);
+
+        const items = await getAgileTestExecutionTestCases(jwt, { projectId, testExecutionId });
+
+        const failed = items.filter((tc) =>
+          executionItemsOf(tc).some((item) => Number(item?.result) === Number(failedResultId)),
+        );
+
+        const jiraIssueIds = failed
+          .map((tc) => tc?.issueId ?? tc?.jiraIssueId ?? tc?.jira?.issueId)
+          .filter((id) => id != null && String(id).trim())
+          .map(String);
+
+        let keysById = new Map();
+        let jiraLookupError = null;
+
+        if ((input.resolveJiraKeys ?? true) && jiraIssueIds.length) {
+          try {
+            keysById = await getJiraIssuesBulk({ ids: jiraIssueIds, fields: ["summary"] });
+          } catch (err) {
+            jiraLookupError = err?.response?.data || err?.message || String(err);
+          }
+        }
+
+        const rows = failed.map((tc, index) => {
+          const jiraIssueId =
+            tc?.issueId ?? tc?.jiraIssueId ?? tc?.jira?.issueId ?? null;
+          const resolved = jiraIssueId != null ? keysById.get(String(jiraIssueId)) : null;
+
+          return {
+            index: index + 1,
+            agileTestTestCaseId: tc?.id ?? null,
+            name: resolved?.summary ?? "",
+            jiraIssueId: jiraIssueId != null ? String(jiraIssueId) : "",
+            jiraIssueKey: resolved?.key ?? "",
+          };
+        });
+
+        const lines = [
+          "# Failed Test Cases",
+          "",
+          `Execution ID: ${testExecutionId}`,
+          "",
+          "| # | Jira Test Case Issue ID | Jira Test Case Key |",
+          "|---|-------------------------|--------------------|",
+        ];
+        for (const row of rows) {
+          lines.push(`| ${row.index} | ${row.jiraIssueId} | ${row.jiraIssueKey} |`);
+        }
+        lines.push("");
+        const markdown = lines.join("\n");
+
+        let writtenTo = null;
+        if (input.outputPath) {
+          const target = path.isAbsolute(input.outputPath)
+            ? input.outputPath
+            : path.join(PROJECT_ROOT, input.outputPath);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, markdown, "utf8");
+          writtenTo = path.relative(PROJECT_ROOT, target) || target;
+        }
+
+        return {
+          projectId,
+          testExecutionId,
+          statusIdsChecked: [Number(failedResultId)],
+          totalTestCases: items.length,
+          failedCount: rows.length,
+          rows,
+          markdown,
+          jiraLookupError,
+          writtenTo,
+          note: rows.length
+            ? "No Jira key was resolved where jiraIssueKey is empty; check jiraLookupError if it is non-null."
+            : "No test case in this execution has a matching failure result id.",
         };
       },
     });

@@ -160,7 +160,7 @@ Restart the client and confirm the server started:
 
 ### Everything that writes previews first
 
-The most important thing to know. `dryRun` **defaults to `true`** on all five
+The most important thing to know. `dryRun` **defaults to `true`** on all ten
 tools that can change Jira or AgileTest, so calling one with no arguments is
 always safe.
 
@@ -183,6 +183,26 @@ always safe.
 `push_test_cases` is idempotent: existing test cases are matched by summary and
 only missing steps are written, so a re-run that changes nothing finishes in
 seconds. It refuses to start if another run holds the same story's lock.
+
+### Test executions and test plans
+
+The same preview-first rule applies when you set up the AgileTest side by hand.
+`projectId` is optional on every AgileTest tool and falls back to
+`AGILETEST_PROJECT_ID`; entity ids can be given either as the AgileTest id or
+as the numeric Jira issue id that produced them.
+
+| Step | Tool | Effect |
+|---|---|---|
+| 1 | `agiletest_create_test_execution` | AgileTest execution for a Jira Test Execution issue |
+| 2 | `agiletest_create_test_plan` | AgileTest plan for a Jira Test Plan issue, over a date range |
+| 3 | `agiletest_link_test_plan_to_executions` | puts the execution inside the plan (optionally links cases too) |
+| 4 | `agiletest_link_testcases_to_execution` | cases belong to the execution, so results land there |
+| 5 | `agiletest_link_testcases_to_test_plan` | cases belong to the plan, so plan reporting sees them |
+| 6 | `agiletest_get_testcases_for_execution` | read back what is linked and how it ended |
+| 7 | `agiletest_export_failed_testcases` | failures only, with Jira keys, as rows + markdown |
+
+Every step above previews first: call it, read `plannedAction`, then call it
+again with `dryRun:false`.
 
 ### Tools
 
@@ -207,6 +227,16 @@ seconds. It refuses to start if another run holds the same story's lock.
 | `agiletest_create_test_step` | Create one step |
 | `agiletest_set_precondition` | Set a precondition |
 | `agiletest_process_from_issue_ids_and_csv` | Steps + preconditions from a CSV |
+| `agiletest_create_test_execution` | Create a test execution (preview first) |
+| `agiletest_get_test_executions_by_issue_ids` | Find executions by Jira issue id |
+| `agiletest_get_testcases_for_execution` | List an execution's cases and results |
+| `agiletest_link_testcases_to_execution` | Put cases in an execution (preview first) |
+| `agiletest_create_test_plan` | Create a test plan (preview first) |
+| `agiletest_get_test_plans_by_issue_ids` | Find plans by Jira issue id |
+| `agiletest_link_test_plan_to_executions` | Assign executions to a plan (preview first) |
+| `agiletest_link_testcases_to_test_plan` | Put cases in a plan (preview first) |
+| `agiletest_resolve_testcase_by_jira_issue_id` | Wait for the AgileTest sync |
+| `agiletest_export_failed_testcases` | Failures of an execution, with Jira keys |
 
 ### Deletion
 

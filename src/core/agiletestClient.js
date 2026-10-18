@@ -437,6 +437,189 @@ export async function getAgileTestTestSteps(jwtToken, { projectId, jiraIssueId }
   return testCase?.testSteps || [];
 }
 
+// Shared normaliser for the */issue/bulk endpoints, which answer with a bare
+// array on some paths and an object wrapper on others. An error body arriving
+// with HTTP 200 is rethrown as a transient error so withAgileTestRetry backs off
+// instead of the caller treating it as a found entity.
+function toEntityList(data, { label, listKeys }) {
+  if (Array.isArray(data)) return data;
+
+  if (data && typeof data === 'object') {
+    for (const key of listKeys) {
+      if (Array.isArray(data[key])) return data[key];
+    }
+    if (data.id != null) return [data];
+
+    if (data.message || data.error) {
+      const transient = new Error(`AgileTest ${label} returned an error: ${data.message || data.error}`);
+      transient.response = { status: 500, data };
+      throw transient;
+    }
+  }
+
+  throw new Error(`Unexpected response from AgileTest ${label} API`);
+}
+
+const authHeaders = (jwtToken) => ({
+  'Content-Type': 'application/json',
+  Authorization: `JWT ${jwtToken}`,
+});
+
+// ---------------------------------------------------------------------------
+// Test executions
+// ---------------------------------------------------------------------------
+
+// Create AgileTest Test Execution(s) from Jira Test Execution issue id(s).
+export async function createAgileTestExecution(jwtToken, { projectId, testExecutionIssueIds }) {
+  const url = `${AGILETEST_BASE}/ds/test-executions`;
+  const payload = {
+    projectId: String(projectId),
+    testExecutionIssueIds: testExecutionIssueIds.map(String),
+  };
+
+  const { data } = await withAgileTestRetry('create test execution', () =>
+    axios.post(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return data;
+}
+
+// Resolve AgileTest Test Execution(s) from Jira Test Execution issue id(s).
+// The AgileTest execution id needed for later link/list calls comes from here.
+export async function getAgileTestExecutionsByJiraIssueIds(jwtToken, { projectId, testExecutionIssueIds }) {
+  const url = `${AGILETEST_BASE}/ds/test-executions/issue/bulk`;
+  const payload = {
+    projectId: String(projectId),
+    issueIds: testExecutionIssueIds.map(String),
+    testExecutionIssueIds: testExecutionIssueIds.map(String),
+    expand: [],
+  };
+
+  const { data } = await withAgileTestRetry('test execution lookup', () =>
+    axios.post(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return toEntityList(data, { label: '/ds/test-executions/issue/bulk', listKeys: ['executions', 'testExecutions'] });
+}
+
+// List the AgileTest test cases linked to an AgileTest Test Execution, each with
+// its testExecutionItems (result status ids) for pass/fail filtering.
+export async function getAgileTestExecutionTestCases(jwtToken, { projectId, testExecutionId }) {
+  const url = `${AGILETEST_BASE}/ds/test-executions/${Number(testExecutionId)}/test-cases`;
+
+  const { data } = await withAgileTestRetry('execution test case list', () =>
+    axios.get(url, {
+      params: { projectId: String(projectId) },
+      headers: authHeaders(jwtToken),
+    }),
+  );
+
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.testCases)) return data.testCases;
+  if (Array.isArray(data?.items)) return data.items;
+  if (data == null) return [];
+
+  throw new Error('Unexpected response from AgileTest /ds/test-executions/{id}/test-cases API');
+}
+
+// Link Jira Test Case issue id(s) to an AgileTest Test Execution.
+export async function linkAgileTestTestCasesToExecution(
+  jwtToken,
+  { projectId, testExecutionId, testCaseIssueIds },
+) {
+  const url = `${AGILETEST_BASE}/ds/test-executions/${Number(testExecutionId)}/link/test-cases`;
+  const payload = {
+    projectId: String(projectId),
+    testCaseIssueIds: testCaseIssueIds.map(String),
+  };
+
+  const { data } = await withAgileTestRetry('link test cases to execution', () =>
+    axios.post(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Test plans
+// ---------------------------------------------------------------------------
+
+// Create AgileTest Test Plan(s) from Jira Test Plan issue id(s) with a date range.
+export async function createAgileTestTestPlan(jwtToken, { projectId, testPlanIssueIds, startDate, endDate }) {
+  const url = `${AGILETEST_BASE}/ds/test-plans`;
+  const payload = {
+    projectId: String(projectId),
+    startDate,
+    endDate,
+    testPlanIssueIds: testPlanIssueIds.map(String),
+  };
+
+  const { data } = await withAgileTestRetry('create test plan', () =>
+    axios.post(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return data;
+}
+
+// Resolve AgileTest Test Plan(s) from Jira Test Plan issue id(s).
+export async function getAgileTestTestPlansByJiraIssueIds(jwtToken, { projectId, testPlanIssueIds }) {
+  const url = `${AGILETEST_BASE}/ds/test-plans/issue/bulk`;
+  const payload = {
+    projectId: String(projectId),
+    testPlanIssueIds: testPlanIssueIds.map(String),
+  };
+
+  const { data } = await withAgileTestRetry('test plan lookup', () =>
+    axios.post(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return toEntityList(data, { label: '/ds/test-plans/issue/bulk', listKeys: ['testPlans', 'plans'] });
+}
+
+// Link Jira Test Case issue id(s) to an AgileTest Test Plan.
+export async function linkAgileTestTestCasesToTestPlan(jwtToken, { projectId, testPlanId, testCaseIssueIds }) {
+  const url = `${AGILETEST_BASE}/ds/test-plans/${Number(testPlanId)}/link/test-cases`;
+  const payload = {
+    projectId: String(projectId),
+    testCaseIssueIds: testCaseIssueIds.map(String),
+  };
+
+  const { data } = await withAgileTestRetry('link test cases to test plan', () =>
+    axios.post(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return data;
+}
+
+// Assign AgileTest Test Execution(s) to an AgileTest Test Plan.
+export async function linkAgileTestTestPlanToExecutions(
+  jwtToken,
+  { projectId, testPlanId, testExecutionIssueIds },
+) {
+  const url = `${AGILETEST_BASE}/ds/test-plans/${Number(testPlanId)}/link/test-executions`;
+  const payload = {
+    projectId: String(projectId),
+    testExecutionIssueIds: testExecutionIssueIds.map(String),
+  };
+
+  const { data } = await withAgileTestRetry('link test plan to test executions', () =>
+    axios.post(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Single test case lookups
+// ---------------------------------------------------------------------------
+
+// GET /ds/test-cases/{id} is deliberately NOT wrapped here. Verified against
+// this instance (2026-10-18): without a testVersionId query param it returns
+// 400 "Invalid value / testVersionId", and with one it returns
+// 401 "Forge Invocation Token verification was unsuccessful", so there is no
+// working AgileTest-id -> Jira-issue read path. Go the other way instead:
+// getAgileTestTestcasesByJiraIssueIds (Jira issue id -> AgileTest test case).
+
 // Delete an AgileTest test case by its AgileTest testCaseId.
 // UNSUPPORTED: verified against this AgileTest instance (2026-09-28) - every
 // DELETE shape on /ds/test-cases returns 404, and deleting the source Jira
