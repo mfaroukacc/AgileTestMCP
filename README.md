@@ -200,6 +200,7 @@ as the numeric Jira issue id that produced them.
 | 5 | `agiletest_link_testcases_to_test_plan` | cases belong to the plan, so plan reporting sees them |
 | 6 | `agiletest_get_testcases_for_execution` | read back what is linked and how it ended |
 | 7 | `agiletest_export_failed_testcases` | failures only, with Jira keys, as rows + markdown |
+| 8 | `agiletest_get_failed_testcases_by_story` | steps 1–7 in one call, from the story key alone |
 
 Every step above previews first: call it, read `plannedAction`, then call it
 again with `dryRun:false`.
@@ -237,6 +238,7 @@ again with `dryRun:false`.
 | `agiletest_link_testcases_to_test_plan` | Put cases in a plan (preview first) |
 | `agiletest_resolve_testcase_by_jira_issue_id` | Wait for the AgileTest sync |
 | `agiletest_export_failed_testcases` | Failures of an execution, with Jira keys |
+| `agiletest_get_failed_testcases_by_story` | Failed cases of any story, one call |
 
 ### Deletion
 

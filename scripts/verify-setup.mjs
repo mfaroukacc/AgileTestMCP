@@ -111,7 +111,7 @@ section("3. Every MCP tool registers with a handler and a schema");
     console.log("NOFORCE=" + (tools.every((t) => !/\\bforce\\b/i.test(t.n)) ));
   `);
   const n = Number((out.match(/TOOLS=(\d+)/) || [])[1]);
-  check("29 tools registered", n === 29, `got ${n}`);
+  check("30 tools registered", n === 30, `got ${n}`);
   check("all have handler + inputSchema", /SCHEMAS_OK/.test(out));
 }
 

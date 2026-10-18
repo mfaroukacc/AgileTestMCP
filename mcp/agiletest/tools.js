@@ -14,7 +14,7 @@ import {
   linkAgileTestTestCasesToTestPlan,
   linkAgileTestTestPlanToExecutions,
 } from "../../src/core/agiletestClient.js";
-import { getJiraIssuesBulk } from "../../src/core/jiraClient.js";
+import { getJiraIssuesBulk, getJiraIssue } from "../../src/core/jiraClient.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -1362,6 +1362,184 @@ export class AgileTestTools {
           note: rows.length
             ? "No Jira key was resolved where jiraIssueKey is empty; check jiraLookupError if it is non-null."
             : "No test case in this execution has a matching failure result id.",
+        };
+      },
+    });
+
+    // Tool: failed test cases for a whole story
+    server.tool("agiletest_get_failed_testcases_by_story", {
+      title: "Get Failed Test Cases for a Story",
+      description:
+        'One-call answer to "which test cases failed for story PROJ-123?". Reads the story in Jira, follows its ' +
+        'issue links to every linked Test Execution issue (type "TestExecution", linked by "Relates" or any other ' +
+        "link type), resolves those issue ids to AgileTest Test Executions, then reads each execution's results via " +
+        "GET /ds/test-executions/{id}/test-cases and keeps only cases with a failed result id (default 28913). " +
+        "Failed Jira issue ids are resolved to keys and summaries in one bulk Jira query. Read-only: nothing is " +
+        "written or linked. A story with several linked Test Executions returns one block per execution plus a " +
+        "combined totalFailed; an execution not yet synced into AgileTest is reported in unresolvedExecutions " +
+        "instead of failing the call. Results only exist after an automated run has written them to AgileTest; a " +
+        "case with result null simply has not been executed yet.",
+      inputSchema: z.object({
+        storyKey: z
+          .string()
+          .describe("Jira user story key to report on, e.g. 'SHP-4401'."),
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testExecutionIssueTypeName: z
+          .string()
+          .optional()
+          .describe(
+            'Jira issue type name of a Test Execution. Default "TestExecution" (override if your Jira uses another name).',
+          ),
+        failedResultId: z
+          .number()
+          .int()
+          .optional()
+          .default(RESULT_STATUS.fail)
+          .describe("Result status id treated as failure. Default 28913 (fail)."),
+        resolveJiraKeys: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("Resolve each failed Jira issue id to its issue key and summary via Jira. Default true."),
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const storyKey = String(input.storyKey || "").trim();
+        if (!storyKey) {
+          throw new Error('storyKey is required, e.g. "SHP-4401".');
+        }
+        const execTypeName = (
+          input.testExecutionIssueTypeName ||
+          process.env.JIRA_TESTEXEC_ISSUE_TYPE ||
+          "TestExecution"
+        )
+          .trim()
+          .toLowerCase();
+        const failedResultId = input.failedResultId ?? RESULT_STATUS.fail;
+
+        let story;
+        try {
+          story = await getJiraIssue(storyKey);
+        } catch (err) {
+          if (err?.response?.status === 404) {
+            throw new Error(`Jira story ${storyKey} not found.`);
+          }
+          throw err;
+        }
+
+        const executionIssues = [];
+        for (const link of story?.fields?.issuelinks || []) {
+          const other = link?.outwardIssue || link?.inwardIssue;
+          const typeName = String(other?.fields?.issuetype?.name || "").trim().toLowerCase();
+          if (other?.id && typeName === execTypeName) {
+            executionIssues.push({ id: String(other.id), key: String(other.key || "") });
+          }
+        }
+
+        if (!executionIssues.length) {
+          throw new Error(
+            `Story ${storyKey} has no linked Test Execution issue (issue type "${input.testExecutionIssueTypeName ||
+              "TestExecution"}"). Link one first with jira:link-testexec-story or the legacy ` +
+              "createAndLinkTestExecution.js, then re-run.",
+          );
+        }
+
+        const jwt = await getAgileTestJwt();
+        const executions = await getAgileTestExecutionsByJiraIssueIds(jwt, {
+          projectId,
+          testExecutionIssueIds: executionIssues.map((e) => e.id),
+        });
+        const byJiraId = new Map(
+          executions.map((e) => [String(e?.issueId ?? e?.jiraIssueId ?? ""), e]),
+        );
+
+        const unresolvedExecutions = executionIssues
+          .filter((e) => !byJiraId.has(e.id))
+          .map((e) => ({
+            jiraExecutionIssueId: e.id,
+            jiraExecutionIssueKey: e.key,
+            reason: "No matching AgileTest Test Execution for this Jira issue id yet (not created or not synced).",
+          }));
+
+        const resolved = executionIssues.filter((e) => byJiraId.has(e.id));
+        const perExecution = [];
+
+        for (const { id: jiraExecId, key: jiraExecKey } of resolved) {
+          const testExecutionId = String(byJiraId.get(jiraExecId).id);
+          const items = await getAgileTestExecutionTestCases(jwt, { projectId, testExecutionId });
+
+          const failedEntries = items
+            .filter((tc) =>
+              executionItemsOf(tc).some((item) => Number(item?.result) === Number(failedResultId)),
+            )
+            .map((tc) => {
+              const jiraIssueId = tc?.issueId ?? tc?.jiraIssueId ?? tc?.jira?.issueId ?? null;
+              return {
+                jiraIssueId: jiraIssueId != null ? String(jiraIssueId) : "",
+                agileTestTestCaseId: tc?.id ?? null,
+              };
+            });
+
+          perExecution.push({
+            jiraExecutionIssueId: jiraExecId,
+            jiraExecutionIssueKey: jiraExecKey,
+            testExecutionId,
+            totalTestCases: items.length,
+            failedEntries,
+          });
+        }
+
+        const allFailedJiraIds = [
+          ...new Set(perExecution.flatMap((pe) => pe.failedEntries.map((f) => f.jiraIssueId).filter(Boolean))),
+        ];
+
+        let keysById = new Map();
+        let jiraLookupError = null;
+
+        if ((input.resolveJiraKeys ?? true) && allFailedJiraIds.length) {
+          try {
+            keysById = await getJiraIssuesBulk({ ids: allFailedJiraIds, fields: ["summary"] });
+          } catch (err) {
+            jiraLookupError = err?.response?.data || err?.message || String(err);
+          }
+        }
+
+        const resultExecutions = perExecution.map((pe) => ({
+          jiraExecutionIssueId: pe.jiraExecutionIssueId,
+          jiraExecutionIssueKey: pe.jiraExecutionIssueKey,
+          testExecutionId: pe.testExecutionId,
+          totalTestCases: pe.totalTestCases,
+          failedCount: pe.failedEntries.length,
+          failedTestCases: pe.failedEntries.map((failed, index) => {
+            const resolvedIssue = failed.jiraIssueId ? keysById.get(failed.jiraIssueId) : null;
+            return {
+              index: index + 1,
+              jiraIssueId: failed.jiraIssueId,
+              jiraIssueKey: resolvedIssue?.key ?? "",
+              name: resolvedIssue?.summary ?? "",
+              agileTestTestCaseId: failed.agileTestTestCaseId,
+            };
+          }),
+        }));
+
+        const totalFailed = resultExecutions.reduce((n, e) => n + e.failedCount, 0);
+
+        return {
+          storyKey: story.key || storyKey,
+          projectId,
+          statusIdsChecked: [Number(failedResultId)],
+          executionsChecked: resultExecutions.length,
+          totalFailed,
+          executions: resultExecutions,
+          unresolvedExecutions,
+          jiraLookupError,
+          note: totalFailed
+            ? "A jiraIssueKey that is empty means the bulk Jira lookup did not cover that id; check jiraLookupError."
+            : "No failed results yet in the linked executions. Either everything passed, or the automated run has not written results to AgileTest for these executions.",
         };
       },
     });
