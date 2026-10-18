@@ -234,6 +234,158 @@ export async function deleteJiraTestCasesByIds({ ids, log = () => {} }) {
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// Bug flow building blocks (chunked automated bug creation)
+// ---------------------------------------------------------------------------
+
+// Plain text -> Atlassian Document Format, one paragraph node. Jira v3 issue
+// fields (description, steps, expected/actual) are ADF; sending a raw string
+// fails validation.
+export function toAdf(text) {
+  const lines = String(text ?? '')
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+
+  const content = lines.length
+    ? lines.map((line) => ({ type: 'paragraph', content: [{ type: 'text', text: line }] }))
+    : [{ type: 'paragraph', content: [] }];
+
+  return { type: 'doc', version: 1, content };
+}
+
+// Atlassian Document Format -> plain text, so the drafting model can read
+// existing Jira content (story description, test case steps) without seeing
+// the node boilerplate. Handles nested marks/nodes defensively.
+export function adfToText(node) {
+  if (node == null) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(adfToText).filter(Boolean).join('\n');
+
+  if (node.type === 'text') return node.text ?? '';
+
+  const inner = adfToText(node.content ?? []);
+  if (node.type === 'bulletList' || node.type === 'orderedList') {
+    const items = (node.content ?? []).map((item, i) =>
+      node.type === 'orderedList' ? `${i + 1}. ${adfToText(item)}` : `- ${adfToText(item)}`,
+    );
+    return items.join('\n');
+  }
+  return inner;
+}
+
+// Search issues by JQL. This instance only accepts POST /rest/api/3/search/jql
+// (GET /search returns 403, old route 410) - same route getJiraIssuesBulk uses.
+export async function searchJiraIssues({ jql, fields = ['summary'], maxResults = 50 }) {
+  const client = getJiraHttpClient();
+  const { data } = await client.post('/rest/api/3/search/jql', {
+    jql,
+    fields,
+    maxResults,
+  });
+  return data?.issues ?? [];
+}
+
+// Resolve a Jira user by display name among users assignable in the project.
+// Used to turn UI_DEVELOPER / FUNCTIONAL_DEVELOPER display names from .env
+// into accountIds for the mandatory post-creation reassignment.
+export async function searchJiraAssignableUser({ displayName, projectKey }) {
+  const client = getJiraHttpClient();
+  const { data } = await client.get('/rest/api/3/user/assignable/search', {
+    params: {
+      query: displayName,
+      project: projectKey || JIRA_PROJECT_KEY,
+      maxResults: 5,
+    },
+  });
+  const users = Array.isArray(data) ? data : [];
+  const exact = users.find((u) => (u?.displayName || '').trim() === String(displayName).trim());
+  const picked = exact || users[0] || null;
+  return picked ? { accountId: picked.accountId, displayName: picked.displayName || '' } : null;
+}
+
+// Add an issue link of any type between two issues. Idempotent at the caller's
+// level: the bug-flow tools check existing links before calling this.
+export async function addJiraIssueLink({ inwardIssueKey, outwardIssueKey, linkTypeName }) {
+  const client = getJiraHttpClient();
+  const body = {
+    type: { name: linkTypeName },
+    inwardIssue: { key: inwardIssueKey },
+    outwardIssue: { key: outwardIssueKey },
+  };
+  await client.post('/rest/api/3/issueLink', body);
+}
+
+// Create a Bug issue with the bug-flow fields. Steps / expected / actual /
+// environment live in dedicated custom fields whose ids differ per project;
+// they are configurable via env (JIRA_BUG_STEPS_FIELD etc.) and skipped when
+// unset or empty so a missing field never fails the creation.
+export async function createJiraBug({
+  summary,
+  description,
+  steps,
+  expectedResults,
+  actualResults,
+  environment,
+  labels = [],
+  priorityName,
+  assigneeAccountId,
+}) {
+  const client = getJiraHttpClient();
+
+  const bugTypeName = process.env.JIRA_BUG_ISSUETYPE_NAME || 'Bug';
+  const stepsField = process.env.JIRA_BUG_STEPS_FIELD || 'customfield_10334';
+  const expectedField = process.env.JIRA_BUG_EXPECTED_FIELD || 'customfield_10335';
+  const actualField = process.env.JIRA_BUG_ACTUAL_FIELD || 'customfield_10336';
+  const defaultEnvironment = process.env.JIRA_BUG_ENVIRONMENT || 'Alpha – Chrome (latest)';
+
+  const fields = {
+    project: { key: JIRA_PROJECT_KEY },
+    summary,
+    description: toAdf(description),
+    issuetype: { name: bugTypeName },
+  };
+
+  if (steps && String(steps).trim()) fields[stepsField] = toAdf(steps);
+  if (expectedResults && String(expectedResults).trim()) fields[expectedField] = toAdf(expectedResults);
+  if (actualResults && String(actualResults).trim()) fields[actualField] = toAdf(actualResults);
+
+  const envText = environment && String(environment).trim() ? environment : defaultEnvironment;
+  fields.environment = toAdf(envText);
+
+  if (Array.isArray(labels) && labels.length) fields.labels = labels;
+  if (priorityName && String(priorityName).trim()) fields.priority = { name: priorityName };
+  if (assigneeAccountId && String(assigneeAccountId).trim()) {
+    fields.assignee = { accountId: assigneeAccountId };
+  }
+
+  const { data } = await client.post('/rest/api/3/issue', { fields });
+  return { key: data.key, id: String(data.id) };
+}
+
+// Inspect an issue's links and return every linked Bug with its status
+// category, so the bug flow can update instead of duplicating (idempotency).
+export async function findLinkedBugs({ issueIdOrKey }) {
+  const client = getJiraHttpClient();
+  const { data } = await client.get(
+    `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}?fields=issuelinks`,
+  );
+
+  const found = [];
+  for (const link of data?.fields?.issuelinks || []) {
+    const other = link?.outwardIssue || link?.inwardIssue;
+    const typeName = String(other?.fields?.issuetype?.name || '').trim().toLowerCase();
+    if (other?.key && typeName === (process.env.JIRA_BUG_ISSUETYPE_NAME || 'Bug').toLowerCase()) {
+      found.push({
+        key: other.key,
+        id: String(other.id),
+        statusCategory: other.fields?.status?.statusCategory?.key ?? null,
+        summary: other.fields?.summary ?? '',
+      });
+    }
+  }
+  return found;
+}
+
 export async function createJiraTestCase({ summary, description, storyKey, priorityName }) {
   const client = getJiraHttpClient();
 

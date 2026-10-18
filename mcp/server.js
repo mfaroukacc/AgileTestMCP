@@ -9,6 +9,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import dotenv from "dotenv";
 import { AgileTestTools } from "./agiletest/tools.js";
 import { JiraTools } from "./jira/tools.js";
+import { BugFlowTools } from "./bugflow/tools.js";
 import { ENV_FILE, REPO_ROOT } from "../src/core/paths.js";
 import { getBuildInfo } from "../src/core/pipeline/fingerprint.js";
 
@@ -99,6 +100,9 @@ AgileTestTools.register(server);
 
 // Register Jira tools
 JiraTools.register(server);
+
+// Register chunked bug-flow tools (prepare drafts -> create bug -> link & finalize)
+BugFlowTools.register(server);
 
 const REQUIRED_ENV = [
   "JIRA_BASE_URL",

@@ -239,6 +239,9 @@ again with `dryRun:false`.
 | `agiletest_resolve_testcase_by_jira_issue_id` | Wait for the AgileTest sync |
 | `agiletest_export_failed_testcases` | Failures of an execution, with Jira keys |
 | `agiletest_get_failed_testcases_by_story` | Failed cases of any story, one call |
+| `jira_prepare_bug_drafts` | Bug flow chunk 1: raw material + rules for drafting bugs (read-only) |
+| `jira_create_bug_from_draft` | Bug flow chunk 2: create one bug from an approved draft (preview first) |
+| `jira_link_and_finalize_bug` | Bug flow chunk 3: link bug to story/test case + UI/functional reassignment (mandatory last step) |
 
 ### Deletion
 
