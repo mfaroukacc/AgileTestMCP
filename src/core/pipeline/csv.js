@@ -108,12 +108,28 @@ export function writeResultsCsv(resultsPath, rows) {
 
 // The Jira phase and the AgileTest phase historically disagreed about whether
 // the CSV lives in Generated_Test_Cases/ or Generated_Test_Cases/Signals/.
-// Resolve both, preferring Signals/, and report which one was used.
+// Resolve both, preferring Signals/, then fall back to any feature subfolder
+// (SuccessStories/, Entities/, ...) so the folder the generator picked does not
+// decide whether a story can be pushed. Report which one was used.
 export function resolveGeneratedCsvPath(storyKey, { required = true } = {}) {
   const filename = `${storyKey}_testcases_generated.csv`;
+
+  let subdirs = [];
+  try {
+    subdirs = fs
+      .readdirSync(GENERATED_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+      .map((e) => path.join(GENERATED_DIR, e.name));
+  } catch {
+    subdirs = [];
+  }
+
   const candidates = [
-    path.join(GENERATED_DIR, 'Signals', filename),
-    path.join(GENERATED_DIR, filename),
+    ...new Set([
+      path.join(GENERATED_DIR, 'Signals', filename),
+      path.join(GENERATED_DIR, filename),
+      ...subdirs.map((d) => path.join(d, filename)),
+    ]),
   ];
 
   for (const candidate of candidates) {
@@ -124,7 +140,7 @@ export function resolveGeneratedCsvPath(storyKey, { required = true } = {}) {
   const err = new Error(
     `Generated test cases CSV not found for ${storyKey}. Looked in:\n` +
       candidates.map((c) => `  - ${c}`).join('\n') +
-      `\nExport it from AgileTest ("Export Test Cases to CSV") or place it in Generated_Test_Cases/Signals/.`,
+      `\nExport it from AgileTest ("Export Test Cases to CSV") or place it in Generated_Test_Cases/.`,
   );
   err.code = 'ECSVNOTFOUND';
   throw err;
@@ -198,4 +214,37 @@ export function groupByTestCase(rows) {
     groupRows.sort((a, b) => Number(a.step_number) - Number(b.step_number));
   }
   return groups;
+}
+
+// Parse CSV content provided as a raw string (used by the LLM generation path)
+export function parseCsvString(raw) {
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length <= 1) return { header: [], rows: [] };
+
+  const header = lines[0].split(',').map((h) => h.trim());
+  const rows = lines.slice(1).map((line) => {
+    const cols = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      if (ch === '"') {
+        inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        cols.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    cols.push(current);
+
+    const obj = {};
+    header.forEach((h, idx) => {
+      obj[h] = (cols[idx] ?? '').replace(/^"|"$/g, '');
+    });
+    return obj;
+  });
+
+  return { header, rows };
 }

@@ -201,6 +201,12 @@ export async function runAgileTestPhase({
     stepsByIssue.set(id, c.testSteps || []);
   }
 
+  // Step counts as they stand AFTER this run's writes. `byIssue.testSteps` was
+  // fetched before the writes, so for every case created or rebuilt here it is
+  // either empty or stale - handing that to verification is what made a
+  // successful first run report "0 steps" for all 23 test cases.
+  const finalStepCounts = new Map();
+
   const summary = {
     createdSteps: 0,
     rebuilt: 0,
@@ -235,6 +241,7 @@ export async function runAgileTestPhase({
     // Preconditions are still evaluated below.
     if (!rebuild && missing.length === 0 && existingSteps.length === expected.length) {
       summary.unchanged += 1;
+      finalStepCounts.set(idKey, existingSteps.length);
     } else {
       // A rebuild deletes every existing step first so stepIndex numbering ends up
       // exact. Previously steps were only ever appended, which is what produced
@@ -262,6 +269,7 @@ export async function runAgileTestPhase({
         );
         summary.createdSteps += 1;
       }
+      finalStepCounts.set(idKey, expected.length);
     }
 
     // Preconditions: AgileTest's create endpoint is create-only and errors if one
@@ -323,11 +331,16 @@ export async function runAgileTestPhase({
 
   // Hand the already-fetched AgileTest state back so the verification step can
   // confirm the result without re-querying the API for every test case.
-  const agileTestState = [...byIssue.values()].map((c) => ({
-    issueId: String(c.issueId),
-    id: c.id,
-    stepCount: (c.testSteps || []).length,
-  }));
+  const agileTestState = [...byIssue.values()].map((c) => {
+    const issueId = String(c.issueId);
+    return {
+      issueId,
+      id: c.id,
+      stepCount: finalStepCounts.has(issueId)
+        ? finalStepCounts.get(issueId)
+        : (c.testSteps || []).length,
+    };
+  });
 
   return {
     dryRun: false,
