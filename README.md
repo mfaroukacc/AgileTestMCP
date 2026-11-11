@@ -197,10 +197,11 @@ as the numeric Jira issue id that produced them.
 | 2 | `agiletest_create_test_plan` | AgileTest plan for a Jira Test Plan issue, over a date range |
 | 3 | `agiletest_link_test_plan_to_executions` | puts the execution inside the plan (optionally links cases too) |
 | 4 | `agiletest_link_testcases_to_execution` | cases belong to the execution, so results land there |
-| 5 | `agiletest_link_testcases_to_test_plan` | cases belong to the plan, so plan reporting sees them |
-| 6 | `agiletest_get_testcases_for_execution` | read back what is linked and how it ended |
-| 7 | `agiletest_export_failed_testcases` | failures only, with Jira keys, as rows + markdown |
-| 8 | `agiletest_get_failed_testcases_by_story` | steps 1–7 in one call, from the story key alone |
+| 5 | `agiletest_set_test_results` | record pass/fail/blocked/... for the execution's cases (all or a subset) |
+| 6 | `agiletest_link_testcases_to_test_plan` | cases belong to the plan, so plan reporting sees them |
+| 7 | `agiletest_get_testcases_for_execution` | read back what is linked and how it ended |
+| 8 | `agiletest_export_failed_testcases` | failures only, with Jira keys, as rows + markdown |
+| 9 | `agiletest_get_failed_testcases_by_story` | the lookups above in one call, from the story key alone |
 
 Every step above previews first: call it, read `plannedAction`, then call it
 again with `dryRun:false`.
@@ -232,6 +233,7 @@ again with `dryRun:false`.
 | `agiletest_get_test_executions_by_issue_ids` | Find executions by Jira issue id |
 | `agiletest_get_testcases_for_execution` | List an execution's cases and results |
 | `agiletest_link_testcases_to_execution` | Put cases in an execution (preview first) |
+| `agiletest_set_test_results` | Record results for an execution's cases (preview first) |
 | `agiletest_create_test_plan` | Create a test plan (preview first) |
 | `agiletest_get_test_plans_by_issue_ids` | Find plans by Jira issue id |
 | `agiletest_link_test_plan_to_executions` | Assign executions to a plan (preview first) |

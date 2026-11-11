@@ -111,7 +111,7 @@ section("3. Every MCP tool registers with a handler and a schema");
     console.log("NOFORCE=" + (tools.every((t) => !/\\bforce\\b/i.test(t.n)) ));
   `);
   const n = Number((out.match(/TOOLS=(\d+)/) || [])[1]);
-  check("30 tools registered", n === 30, `got ${n}`);
+  check("31 tools registered", n === 31, `got ${n}`);
   check("all have handler + inputSchema", /SCHEMAS_OK/.test(out));
 }
 
@@ -128,7 +128,7 @@ section("4. Write-capable tools are safe by default");
       "agiletest_run_csv_from_env_story", "dedupe_story",
       "agiletest_create_test_execution", "agiletest_create_test_plan",
       "agiletest_link_testcases_to_execution", "agiletest_link_testcases_to_test_plan",
-      "agiletest_link_test_plan_to_executions",
+      "agiletest_link_test_plan_to_executions", "agiletest_set_test_results",
     ];
     let bad = 0, seen = 0;
     for (const [n, s] of tools) {
@@ -142,7 +142,7 @@ section("4. Write-capable tools are safe by default");
   `);
   const seen = Number((out.match(/SEEN=(\d+)/) || [])[1]);
   const bad = Number((out.match(/UNSAFE_COUNT=(\d+)/) || [])[1]);
-  check("10 write-capable tools checked", seen === 10, `got ${seen}`);
+  check("11 write-capable tools checked", seen === 11, `got ${seen}`);
   check("all default to dry run when dryRun is omitted", bad === 0, bad ? `${bad} still write by default` : "");
 }
 

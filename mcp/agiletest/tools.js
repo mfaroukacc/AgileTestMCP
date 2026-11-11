@@ -8,6 +8,7 @@ import {
   createAgileTestExecution,
   getAgileTestExecutionsByJiraIssueIds,
   getAgileTestExecutionTestCases,
+  setAgileTestExecutionTestResult,
   linkAgileTestTestCasesToExecution,
   createAgileTestTestPlan,
   getAgileTestTestPlansByJiraIssueIds,
@@ -914,6 +915,137 @@ export class AgileTestTools {
           testCaseIssueIds,
           linkedCount: testCaseIssueIds.length,
           result,
+        };
+      },
+    });
+
+    // Tool: record results for the test cases of an execution
+    server.tool("agiletest_set_test_results", {
+      title: "Set Test Results for an AgileTest Execution",
+      description:
+        "Record a result status (pass 28912, fail 28913, blocked 28914, query 28915, skipped 28916, retest 28917) " +
+        "for test cases in an AgileTest Test Execution via PUT /ds/test-executions/{id}/test-case/{testCaseId}. " +
+        "Pass testCaseIssueIds (numeric Jira Test Case issue ids) to record the result for specific cases, or omit " +
+        "them to record it for every case currently linked to the execution (e.g. mark a whole execution pass). " +
+        "The execution may be given as the AgileTest id or as the numeric Jira Test Execution issue id. The results " +
+        "written here are what agiletest_get_testcases_for_execution, agiletest_export_failed_testcases and the " +
+        "bug-flow phases read. Previews by default; pass dryRun=false to write.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("AgileTest project id; defaults to AGILETEST_PROJECT_ID in .env."),
+        testExecutionId: ID_INPUTS.testExecutionId,
+        jiraTestExecutionIssueId: ID_INPUTS.jiraTestExecutionIssueId,
+        result: z
+          .enum(Object.keys(RESULT_STATUS))
+          .optional()
+          .describe("Result label to record: pass, fail, blocked, query, skipped or retest."),
+        testCaseIssueIds: JIRA_ISSUE_IDS.optional().describe(
+          "Numeric Jira Test Case issue IDs to record the result for. Omit to record it for ALL cases linked to the execution.",
+        ),
+        dryRun: dryRunSchema,
+      }),
+      outputSchema: z.any(),
+      async handler(input) {
+        const projectId = resolveProjectId(input);
+        const statusId = RESULT_STATUS[input.result];
+        if (statusId == null) {
+          throw new Error(
+            `result must be one of: ${Object.keys(RESULT_STATUS).join(", ")}.`,
+          );
+        }
+
+        if (input.dryRun !== false) {
+          return dryRunPreview(
+            projectId,
+            "PUT /ds/test-executions/{id}/test-case/{testCaseId} (per case)",
+            {
+              testExecutionId: input.testExecutionId ?? null,
+              jiraTestExecutionIssueId: input.jiraTestExecutionIssueId ?? null,
+              result: input.result,
+              statusId,
+              testCaseIssueIds: input.testCaseIssueIds ?? null,
+              target: input.testCaseIssueIds
+                ? `${input.testCaseIssueIds.length} specific test case(s)`
+                : "all test cases linked to the execution",
+            },
+          );
+        }
+
+        const jwt = await getAgileTestJwt();
+        const testExecutionId = await resolveAgileTestExecutionId(jwt, projectId, input);
+        const items = await getAgileTestExecutionTestCases(jwt, { projectId, testExecutionId });
+
+        const explicitIds = input.testCaseIssueIds
+          ? input.testCaseIssueIds.map((v) => String(v ?? "").trim()).filter(Boolean)
+          : null;
+
+        const targets = [];
+        const notFoundIssueIds = [];
+        if (explicitIds) {
+          const byIssueId = new Map(items.map((tc) => [String(tc?.issueId ?? ""), tc]));
+          for (const issueId of explicitIds) {
+            const tc = byIssueId.get(issueId);
+            if (tc?.id != null) {
+              targets.push(tc);
+            } else {
+              notFoundIssueIds.push(issueId);
+            }
+          }
+        } else {
+          for (const tc of items) {
+            if (tc?.id != null) targets.push(tc);
+          }
+        }
+
+        if (!targets.length) {
+          throw new Error(
+            explicitIds
+              ? `None of the given Jira Test Case issue ids are linked to execution ${testExecutionId}. ` +
+                `Call agiletest_link_testcases_to_execution first.`
+              : `Execution ${testExecutionId} has no test cases linked. ` +
+                `Call agiletest_link_testcases_to_execution first.`,
+          );
+        }
+
+        const updates = [];
+        const errors = [];
+        for (let i = 0; i < targets.length; i += 1) {
+          const tc = targets[i];
+          const entry = {
+            agileTestTestCaseId: String(tc.id),
+            jiraIssueId: tc?.issueId ?? null,
+          };
+          try {
+            await setAgileTestExecutionTestResult(jwt, {
+              projectId,
+              testExecutionId,
+              testCaseId: tc.id,
+              result: statusId,
+            });
+            updates.push(entry);
+          } catch (e) {
+            errors.push({ ...entry, error: e?.response?.data?.message || e?.message || String(e) });
+          }
+          // Pace the writes the same way the legacy scripts pace their loops.
+          if (i < targets.length - 1) {
+            await sleep(150);
+          }
+        }
+
+        return {
+          dryRun: false,
+          projectId,
+          testExecutionId,
+          result: input.result,
+          statusId,
+          targetCount: targets.length,
+          updatedCount: updates.length,
+          errorCount: errors.length,
+          notFoundIssueIds,
+          updates,
+          errors,
         };
       },
     });

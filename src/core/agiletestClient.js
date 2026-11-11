@@ -540,6 +540,29 @@ export async function linkAgileTestTestCasesToExecution(
   return data;
 }
 
+// Record a result status for one test case in an AgileTest Test Execution.
+// `result` is the AgileTest result status id (28912 pass, 28913 fail, 28914
+// blocked, 28915 query, 28916 skipped, 28917 retest - instance-specific, see
+// readme.txt). This is the write counterpart of getAgileTestExecutionTestCases:
+// the recorded results are what the export-failed / bug-flow phases read back.
+export async function setAgileTestExecutionTestResult(
+  jwtToken,
+  { projectId, testExecutionId, testCaseId, result },
+) {
+  const url =
+    `${AGILETEST_BASE}/ds/test-executions/${Number(testExecutionId)}/test-case/${Number(testCaseId)}`;
+  const payload = {
+    projectId: String(projectId),
+    testExecutionItem: { result: Number(result) },
+  };
+
+  const { data } = await withAgileTestRetry('set execution test result', () =>
+    axios.put(url, payload, { headers: authHeaders(jwtToken) }),
+  );
+
+  return data;
+}
+
 // ---------------------------------------------------------------------------
 // Test plans
 // ---------------------------------------------------------------------------
